@@ -1,0 +1,38 @@
+---
+title: "Descomposicion"
+format: html
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+library(fpp3)
+```
+
+```{r}
+medicinas <-read_csv("medicinas.csv")
+medicinas
+```
+```{r}
+medicinas<-medicinas|>
+  mutate(fecha=yearmonth(fecha))|>
+  as_tsibble(index=fecha)
+medicinas
+```
+```{r}
+medicinas|>
+  autoplot(Cost)
+```
+```{r}
+medicinas|> 
+  model(dcmp_clasica = classical_decomposition(Cost,type='multiplicative')) |>
+  components() |>
+  autoplot()
+```
+
+
+
+
+
+
+
