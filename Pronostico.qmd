@@ -1,0 +1,333 @@
+---
+title: "pronostico"
+format: html
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+library(fpp3)
+```
+El .~ fecha es para indicar desde el inicio hasta la fecha indicada
+Si fuera desde una fecha hasta el final seria fecha ~ .
+```{r}
+gas_train <- aus_production |> 
+  filter_index(. ~ "2007 Q2")
+
+gas_train
+```
+
+
+```{r}
+gas_train |> 
+  autoplot(log(Gas))
+```
+
+```{r}
+gas_lambda<-gas_train |>
+  features(Gas, features=guerrero) |>
+  pull()
+gas_lambda
+```
+
+
+```{r}
+gas_train|>
+  autoplot(box_cox(Gas, lambda=gas_lambda)) 
+```
+
+```{r}
+gas_fit<-gas_train |>
+  model(drift=RW(box_cox(Gas, lambda=gas_lambda) ~ drift()),
+        snaive= SNAIVE(box_cox(Gas, lambda=gas_lambda)),
+        mean=MEAN(box_cox(Gas, lambda=gas_lambda))
+        )
+gas_fit
+```
+
+```{r}
+gas_aug<-gas_fit |>
+  augment()
+gas_aug 
+```
+
+
+```{r}
+gas_aug|> autoplot(.innov)+
+  facet_wrap(~.model,ncol = 1,scales="free_y")
+```
+
+
+```{r}
+gas_aug|>
+  ACF(.innov) |>
+  autoplot()+
+  facet_wrap(~.model,ncol=1,scale="free_y")
+```
+Si las lineas negras pasan por encima de las azules, hay autocorrelacion significativo, por lo que aun hay informacion.
+
+
+```{r}
+gas_aug |> 
+  ggplot(aes(x = .innov, fill = .model)) +
+  geom_histogram() +
+  facet_wrap(~.model, ncol = 1, scales = "free_y")
+```
+
+
+```{r}
+gas_fit |> 
+  select(drift) |> 
+  gg_tsresiduals()
+```
+
+
+Vamos a realizar un pronostico con estos tres modelos
+
+```{r}
+gas_fc <- gas_fit |>
+  forecast(h = "3 years")
+gas_fc
+
+aus_prod_recent <- aus_production |> 
+  filter_index("1995 Q1" ~ .)
+```
+
+```{r}
+gas_fc|>
+  autoplot(aus_production)+
+  facet_wrap(vars(.model),scales = "free_y",ncol=1)
+```
+
+
+```{r}
+gas_fc |>
+  accuracy(aus_production)
+```
+
+
+```{r}
+gas_fit|>
+  accuracy()|>
+  arrange(RMSE)
+```
+
+```{r}
+gas_train|>
+  model(
+    stl=STL(box_cox(Gas, gas_lambda) ~ season(window="periodic"), robust=TRUE)
+    )|>
+  components()
+  
+```
+
+
+
+
+
+```{r}
+gas_dcmp<-gas_train |>
+  model(
+    dcmp=decomposition_model(                                                        #<1>
+      STL(box_cox(Gas,gas_lambda) ~ season(window="periodic"), robust=TRUE),         #<2>
+      RW(season_adjust~drift()),                                                     #<3>
+      SNAIVE(season_year)                                                            #<4>
+      )                                                          
+    )
+gas_dcmp
+```
+
+```{r}
+gas_dcmp |> 
+  gg_tsresiduals()
+
+```
+
+Prueba de hipotesis para la correlacion
+Ho: no hay correlacion Q=0
+H1: hay correlacion Qdif0
+```{r}
+gas_dcmp |> 
+  augment() |>
+  features(.innov, ljung_box, lag = 8)
+
+gas_dcmp |> 
+  accuracy()
+```
+
+
+```{r}
+gas_dcmp_fc <- gas_dcmp |>
+  forecast(h = "3 years")
+gas_dcmp_fc
+gas_dcmp_fc |>
+  autoplot(aus_production|> filter_index("1999 Q1"~.))+labs(title="Descomposicion y pronostico del gas")
+```
+
+
+
+
+
+```{r}
+gas_fc_full <- gas_fc |> 
+  full_join(gas_dcmp_fc)
+
+gas_fc_full
+
+
+```
+
+
+```{r}
+gas_fc_full |> 
+  accuracy(aus_production) |> 
+  arrange(RMSE)
+
+gas_fc_full |> autoplot(aus_production|> filter_index("1999 Q1"~.),level=NULL)
+```
+
+
+```{r}
+gas_fit_full <- gas_fit |> cross_join(gas_dcmp) |> mutate(combinado=(snaive+dcmp)/2)
+gas_fit_full
+```
+
+```{r}
+gas_fcst_full <- gas_fit_full |> 
+  forecast(h = "3 years")
+
+gas_fcst_full |>
+  filter(.model %in% c("dcmp", "combinado", "snaive")) |> 
+  autoplot(aus_prod_recent, level = NULL)
+
+gas_fcst_full |>
+  accuracy(aus_production) |> 
+  arrange(RMSE)
+```
+
+# ETS
+## SES
+
+```{r}
+ses<-gas_train |>
+  model(
+    ses=ETS(Gas~ 
+              error("A")+
+              trend("N")+
+              season("N"))
+  )
+ses
+```
+1. `ETS()` es la función para estimar modelos de suavización exponencial y se deben definir 3 argumentos: error, tendencia y estacionalidad.
+2. Tenemos dos opciones: `"A"` para error aditivo, y `M` para multiplicativo.
+3. Para especificar que no queremos tendencia ni estacionalidad, ponemos `"N"` en ambos casos.
+
+```{r}
+report(ses)
+```
+```{r}
+ses |> 
+  forecast(h="3 years") |>
+  autoplot(aus_prod_recent)
+```
+## Tendencia lineal
+
+```{r}
+holt<-gas_train |>
+  model(
+    holt=ETS(Gas~ 
+              error("A")+
+              trend("A")+
+              season("N"))
+  )
+holt |> 
+  forecast(h="3 years") |>
+  autoplot(aus_prod_recent)
+```
+
+## Tendencia lineal con amortiguamiento
+```{r}
+ets_trend <- gas_train |> 
+  model(
+    holt = ETS(Gas ~ error("A") + trend("A") + season("N")),
+    tend_amort = ETS(Gas ~ error("A") + trend("Ad") + season("N"))
+  )
+
+ets_trend
+
+ets_trend |> 
+  select(tend_amort) |> 
+  report()
+
+ets_trend |> 
+  forecast(h = "30 years") |> 
+  autoplot(aus_prod_recent, level = NULL)
+```
+```{r}
+STLF<- decomposition_model(                                                        
+      STL(box_cox(Gas,gas_lambda) ~ season(window="periodic"), robust=TRUE),         
+      RW(season_adjust~drift()),                                                    
+      SNAIVE(season_year)                                                            
+      )                  
+
+STFL_holt<- decomposition_model(
+  STL(box_cox(Gas, gas_lambda) ~ season(window="periodic")),
+  ETS(season_adjust ~ error("A") + trend("Ad") + season("N")),
+  SNAIVE(season_year)
+)
+gas_fit<-gas_train |> 
+  model(
+    snaive= SNAIVE(box_cox(Gas, lambda=gas_lambda)),
+    STLF=STLF,
+    STFL_holt=STFL_holt
+  )
+
+gas_fcst<- gas_fit |> 
+  forecast(h = "3 years")
+
+p<-gas_fcst |> 
+  autoplot(aus_production|> filter_index("1999 Q1"~.),level=NULL)+
+  labs(title="Pronostico del gas con ETS y STL")
+p
+```
+
+
+## Holt-Winters
+```{r}
+hw<-gas_train |>
+  model(
+    hw=ETS(Gas~ error("M")+trend("Ad",phi = 0.8)+season("M")),
+    hw_boxcox=ETS(box_cox(Gas, gas_lambda)~ error("A")+trend("Ad",phi = 0.8)+season("A"))
+  )
+hw |> select(hw) |> 
+  report()
+hw |> 
+  forecast(h="3 years") |>
+  autoplot(aus_prod_recent,level=NULL)
+plotly::ggplotly(p)
+```
+```{r}
+gas_fit_todos<-gas_fit |> 
+  cross_join(hw) |>
+  mutate(
+    snaive_stfl= (snaive+STLF)/2,
+    snaive_hwbcox= (snaive+hw_boxcox)/2,
+    todos=(snaive+STLF+STFL_holt+hw+hw_boxcox)/5
+    )
+gas_fit_todos
+```
+
+```{r}
+gas_fcst_todos <- gas_fit_todos |> 
+  forecast(h = "3 years")
+
+gas_fcst_todos |> accuracy(aus_production) |> 
+  arrange(RMSE)
+
+p <- gas_fcst_todos |>  filter(.model %in% c("snaive", "STLF", "STFL_holt", "hw", "hw_boxcox", "snaive_stfl")) |> 
+  autoplot(aus_prod_recent, level = NULL)
+
+plotly::ggplotly(p)
+```
+
+
